@@ -318,7 +318,7 @@ export function XRayView({ onClose, dwellMs = 900, blinkSelect = true }: { onClo
       // Readout.
       const fps = frameTimes.length > 1 ? ((frameTimes.length - 1) * 1000) / (frameTimes[frameTimes.length - 1] - frameTimes[0]) : 0;
       const lines = [
-        "MOTOR SOVEREIGNTY · X-RAY",
+        "Mirror of Sovereignty · X-RAY",
         `HEAD POSE · PUPIL FIT${cv ? "" : "  (loading…)"}`,
         tracking ? "FACE LOCK ●" : "NO FACE",
         pose ? `YAW ${pose.yaw.toFixed(0).padStart(4)}°  PITCH ${pose.pitch.toFixed(0).padStart(4)}°  ROLL ${pose.roll.toFixed(0).padStart(4)}°` : "YAW —  PITCH —  ROLL —",

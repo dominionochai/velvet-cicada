@@ -6,6 +6,7 @@ import { useGaze } from "@/lib/gazeContext";
 import { useGazeSelect } from "@/hooks/useGazeSelect";
 import { presetProfile, type MotorProfile } from "@/lib/motor/profile";
 import { DEFAULT_FACE, faceFromLandmarks, type FaceGeometry } from "@/lib/tryon/face";
+import { detectFace, loadDemoPhoto } from "@/lib/tryon/demoFace";
 import { CATALOG, findGroup, findOption, parseSlot, slotKey } from "@/lib/tryon/catalog";
 import { INTENSITY_STEP, initialLookState, lookReducer } from "@/lib/tryon/lookHistory";
 import { MockRenderer } from "@/lib/tryon/mockRenderer";
@@ -34,8 +35,8 @@ function createRenderer(): TryOnRenderer {
 export function TryOnStudio({ profile, onProfileChange, onReprofile, xrayOpen = false, onOpenXray }: TryOnStudioProps) {
   const { stream, overlayRef } = useGaze();
   const rootRef = useRef<HTMLDivElement>(null);
+  const sheetRef = useRef<HTMLElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
-  const optionsRef = useRef<HTMLDivElement>(null);
   const rendererRef = useRef<TryOnRenderer | null>(null);
   /** The face frame every render in this styling session is based on, so results stay consistent. */
   const originalRef = useRef<string | null>(null);
@@ -53,22 +54,36 @@ export function TryOnStudio({ profile, onProfileChange, onReprofile, xrayOpen = 
   const [original, setOriginal] = useState<string | null>(null);
   const [rendering, setRendering] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [optionsHeight, setOptionsHeight] = useState(0);
+  /** Demo photo shown in place of the camera when there is none. */
+  const [idleImage, setIdleImage] = useState<string | null>(null);
 
   const category = CATALOG.find((c) => c.id === categoryId) ?? CATALOG[0];
   const group = findGroup(category.id, groupId) ?? category.groups[0];
   const scale = profile.targetScale;
 
-  // Measure the options column so large targets in a small safe zone switch to two columns instead of overflowing.
+  // The right rail stops above the bottom sheet, whatever height the sheet ends up with.
   useEffect(() => {
-    const element = optionsRef.current;
-    if (!element) return;
-    const update = () => setOptionsHeight(element.clientHeight);
+    const sheet = sheetRef.current;
+    const root = rootRef.current;
+    if (!sheet || !root) return;
+    const update = () => root.style.setProperty("--sheet-h", `${sheet.offsetHeight}px`);
     update();
     const observer = new ResizeObserver(update);
-    observer.observe(element);
+    observer.observe(sheet);
     return () => observer.disconnect();
   }, []);
+
+  // With no camera, show the demo photo (if present) instead of a black stage.
+  useEffect(() => {
+    if (stream) return;
+    let cancelled = false;
+    void loadDemoPhoto().then((url) => {
+      if (!cancelled) setIdleImage(url);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [stream]);
 
   // ── Camera preview ────────────────────────────────────────────────────────
   useEffect(() => {
@@ -96,22 +111,33 @@ export function TryOnStudio({ profile, onProfileChange, onReprofile, xrayOpen = 
     canvas.height = 480;
     const ctx = canvas.getContext("2d");
     if (ctx) {
-      ctx.fillStyle = "#d9c3cf";
+      const g = ctx.createLinearGradient(0, 0, 0, 480);
+      g.addColorStop(0, "#2A2A2E");
+      g.addColorStop(1, "#101012");
+      ctx.fillStyle = g;
       ctx.fillRect(0, 0, 640, 480);
-      ctx.fillStyle = "#b99aab";
-      ctx.beginPath();
-      ctx.ellipse(320, 250, 120, 150, 0, 0, 2 * Math.PI);
-      ctx.fill();
     }
     return canvas.toDataURL("image/jpeg", 0.9);
   }, []);
 
   /** Fixes the frame and face position that every render in this styling session is based on. */
-  const lockOriginal = useCallback((): string => {
+  const lockOriginal = useCallback(async (): Promise<string> => {
     if (originalRef.current) return originalRef.current;
     const real = captureFrame();
-    originalRef.current = real ?? placeholderFrame();
-    faceRef.current = (real ? faceFromLandmarks(overlayRef.current.landmarks) : null) ?? DEFAULT_FACE;
+    if (real) {
+      originalRef.current = real;
+      faceRef.current = faceFromLandmarks(overlayRef.current.landmarks) ?? DEFAULT_FACE;
+      return real;
+    }
+    // No camera: use the demo photo if there is one, and find the face in it.
+    const demo = await loadDemoPhoto();
+    if (demo) {
+      originalRef.current = demo;
+      faceRef.current = (await detectFace(demo)) ?? DEFAULT_FACE;
+      return demo;
+    }
+    originalRef.current = placeholderFrame();
+    faceRef.current = DEFAULT_FACE;
     return originalRef.current;
   }, [captureFrame, placeholderFrame, overlayRef]);
 
@@ -130,7 +156,7 @@ export function TryOnStudio({ profile, onProfileChange, onReprofile, xrayOpen = 
       setRendering(true);
       setError(null);
       try {
-        const frame = lockOriginal();
+        const frame = await lockOriginal();
         setOriginal(frame);
         const result = await rendererRef.current.render({ frame, face: faceRef.current, look: look.present }, controller.signal);
         if (!controller.signal.aborted) setRendered({ url: result.imageUrl, source: result.source, local: result.localSlots?.length ?? 0 });
@@ -167,7 +193,7 @@ export function TryOnStudio({ profile, onProfileChange, onReprofile, xrayOpen = 
   const toggleCompare = () => {
     setCompare((on) => !on);
     setLock(null);
-    setOriginal(lockOriginal());
+    void lockOriginal().then(setOriginal);
   };
 
   const handleAction = (id: string) => {
@@ -215,6 +241,8 @@ export function TryOnStudio({ profile, onProfileChange, onReprofile, xrayOpen = 
   const canAdjust = Boolean(activeInfo?.group?.adjustable);
 
   const zone = profile.safeZone;
+  // A small reach zone (high-tremor / ultra-limited range) cannot fit the full layout, so drop the extras and keep the controls.
+  const compact = zone.bottom - zone.top < 620 || zone.right - zone.left < 900;
   const rootStyle = {
     left: zone.left,
     top: zone.top,
@@ -223,27 +251,24 @@ export function TryOnStudio({ profile, onProfileChange, onReprofile, xrayOpen = 
     "--scale": scale,
   } as CSSProperties;
 
-  const gazeButton = (id: string, label: string, opts: { pressed?: boolean; disabled?: boolean; swatch?: string; small?: boolean; flex?: number } = {}) => (
+  const gazeButton = (id: string, label: string, opts: { pressed?: boolean; disabled?: boolean; swatch?: string; kind?: "opt" | "tab" | "pill" | "fab" } = {}) => (
     <button
       key={id}
       type="button"
-      className={opts.small ? "ms-tile ms-tile--sm" : "ms-tile"}
+      className={`ms-tile ms-${opts.kind ?? "fab"}`}
       data-gaze-action={id}
       data-focused={focusedId === id ? "true" : undefined}
       aria-pressed={opts.pressed}
       disabled={opts.disabled}
       onClick={() => handleAction(id)}
-      style={{ "--p": focusedId === id ? progress : 0, ...(opts.flex ? { flex: opts.flex } : {}) } as CSSProperties}
+      style={{ "--p": focusedId === id ? progress : 0 } as CSSProperties}
     >
       {opts.swatch && <span className="ms-swatch" aria-hidden="true" style={{ "--c": opts.swatch } as CSSProperties} />}
       <span>{label}</span>
     </button>
   );
 
-  const optionCount = group.options.length;
-  const oneColumnFits = optionsHeight === 0 || optionCount * 56 * scale + (optionCount - 1) * 12 <= optionsHeight;
-  const optionCols = oneColumnFits ? 1 : 2;
-  const stageImage = rendered?.url ?? null;
+  const stageImage = rendered?.url ?? (stream ? null : idleImage);
   const hasLook = Object.keys(look.present).length > 0;
   const localCount = rendered?.local ?? 0;
 
@@ -251,6 +276,7 @@ export function TryOnStudio({ profile, onProfileChange, onReprofile, xrayOpen = 
     <div
       ref={rootRef}
       className="ms-root"
+      data-compact={compact ? "true" : undefined}
       style={rootStyle}
       // Real pointer clicks are swallowed while the touch lock is on; gaze selection calls element.click(), which is untrusted.
       onClickCapture={(event: { nativeEvent: Event; stopPropagation: () => void; preventDefault: () => void }) => {
@@ -260,96 +286,92 @@ export function TryOnStudio({ profile, onProfileChange, onReprofile, xrayOpen = 
         }
       }}
     >
+      <div className="ms-stage">
+        {/* Always mounted so frames can be captured whatever is on screen. */}
+        <video ref={videoRef} autoPlay muted playsInline style={{ visibility: stageImage || compare ? "hidden" : "visible" }} />
+        {compare ? (
+          (["A", "B"] as const).map((side) => {
+            const id = `lock-${side}`;
+            const locked = lock === side;
+            return (
+              <button
+                key={side}
+                type="button"
+                className="ms-pane"
+                data-gaze-action={id}
+                data-focused={focusedId === id ? "true" : undefined}
+                onClick={() => handleAction(id)}
+                style={{ flex: lock === null ? 1 : locked ? 3 : 1 }}
+              >
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src={(side === "A" ? original : stageImage ?? original) ?? undefined} alt={side === "A" ? "Original" : "Full styling"} />
+                <span className="ms-label">{side === "A" ? "Original" : "Full styling"}{locked ? " · locked" : ""}</span>
+              </button>
+            );
+          })
+        ) : (
+          <>
+            {stageImage && (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img src={stageImage} alt="Try-on result" />
+            )}
+            {rendered?.source === "mock" && <span className="ms-label" data-tone="warn">Mock preview · not a real try-on</span>}
+            {rendered?.source === "youcam" && <span className="ms-label">YouCam{localCount > 0 ? ` + ${localCount} local` : ""}</span>}
+            {rendering && <span className="ms-label ms-label--right">Rendering…</span>}
+            {!hasLook && <span className="ms-hint">Look at an option and hold to apply it</span>}
+            {error && <span className="ms-error" role="alert">{error}</span>}
+          </>
+        )}
+      </div>
+
       <header className="ms-topbar">
         <div className="ms-brand">
-          MOTOR SOVEREIGNTY
-          <small>HANDS-FREE TRY-ON · GAZE + DWELL{profile.blinkSelect ? " + BLINK" : ""}</small>
+          <span className="ms-logo" aria-hidden="true">✦</span>
+          <span>
+            Mirror of Sovereignty
+            <small>Hands-free try-on · gaze + dwell{profile.blinkSelect ? " + blink" : ""}</small>
+          </span>
         </div>
         <div className="ms-chips">
-          <span className="ms-chip" data-tone={touchLocked ? "alert" : undefined}>{touchLocked ? "TOUCH DISABLED" : "TOUCH ENABLED"}</span>
-          <span className="ms-chip">DWELL {profile.dwellMs}ms</span>
-          <span className="ms-chip">TOLERANCE {profile.tolerance.toUpperCase()}</span>
-          <span className="ms-chip" data-tone={profile.blinkSelect ? "ok" : undefined}>BLINK {profile.blinkSelect ? "ON" : "OFF"}</span>
+          <span className="ms-chip" data-tone={touchLocked ? "alert" : undefined}>{touchLocked ? "Touch disabled" : "Touch enabled"}</span>
+          <span className="ms-chip">Dwell {profile.dwellMs}ms</span>
+          <span className="ms-chip">Tolerance {profile.tolerance}</span>
+          <span className="ms-chip" data-tone={profile.blinkSelect ? "ok" : undefined}>Blink {profile.blinkSelect ? "on" : "off"}</span>
         </div>
       </header>
 
-      <nav className="ms-grid" style={{ gridTemplateColumns: "repeat(4, minmax(0, 1fr))" }} aria-label="Categories">
-        {CATALOG.map((c) => gazeButton(`cat:${c.id}`, c.label, { pressed: c.id === category.id }))}
-      </nav>
-
-      <div className="ms-grid" style={{ gridTemplateColumns: `repeat(${category.groups.length}, minmax(0, 1fr))` }} aria-label="Groups">
-        {category.groups.map((g) => gazeButton(`grp:${g.id}`, g.label, { pressed: g.id === group.id, small: true }))}
-      </div>
-
-      <div className="ms-main">
-        <div className="ms-options" aria-label="Options" ref={optionsRef}>
-          <div className="ms-options-inner" style={{ "--cols": optionCols, "--rows": Math.ceil(group.options.length / optionCols) } as CSSProperties}>
-            {group.options.map((o) => {
-              const applied = look.present[slotKey(category.id, group.id)]?.optionId === o.id;
-              return gazeButton(`opt:${o.id}`, o.label, { pressed: applied, swatch: o.color });
-            })}
-          </div>
-        </div>
-
-        <div className="ms-stage">
-          {/* Always mounted so frames can be captured whatever is on screen. */}
-          <video ref={videoRef} autoPlay muted playsInline style={{ visibility: stageImage || compare ? "hidden" : "visible" }} />
-          {compare ? (
-            (["A", "B"] as const).map((side) => {
-              const id = `lock-${side}`;
-              const locked = lock === side;
-              return (
-                <button
-                  key={side}
-                  type="button"
-                  className="ms-pane"
-                  data-gaze-action={id}
-                  data-focused={focusedId === id ? "true" : undefined}
-                  onClick={() => handleAction(id)}
-                  style={{ flex: lock === null ? 1 : locked ? 3 : 1 }}
-                >
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img src={(side === "A" ? original : stageImage ?? original) ?? undefined} alt={side === "A" ? "Original" : "Full styling"} />
-                  <span className="ms-label">{side === "A" ? "A · ORIGINAL" : "B · FULL STYLING"}{locked ? " · LOCKED" : ""}</span>
-                </button>
-              );
-            })
-          ) : (
-            <>
-              {stageImage && (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img src={stageImage} alt="Try-on result" />
-              )}
-              {rendered?.source === "mock" && <span className="ms-label" data-tone="warn">MOCK PREVIEW · NOT A REAL TRY-ON</span>}
-              {rendered?.source === "youcam" && (
-                <span className="ms-label">YOUCAM{localCount > 0 ? ` + ${localCount} LOCAL` : ""}</span>
-              )}
-              {rendering && <span className="ms-label ms-label--right">RENDERING…</span>}
-              {!hasLook && <span className="ms-hint">LOOK AT AN OPTION AND HOLD TO APPLY IT</span>}
-              {error && <span className="ms-error" role="alert">{error}</span>}
-            </>
-          )}
-        </div>
-      </div>
-
-      <div className="ms-controls">
-        {gazeButton("intensity-down", "− LESS", { disabled: !canAdjust })}
+      <aside className="ms-rail" aria-label="Adjust and actions">
+        {gazeButton("intensity-up", "+", { disabled: !canAdjust, kind: "fab" })}
         <div className="ms-meter" aria-live="polite">
-          <span className="ms-meter-title">{activeInfo?.option ? `${activeInfo.group?.label} · ${activeInfo.option.label}`.toUpperCase() : "SELECT AN OPTION"}</span>
-          <div className="ms-meter-bar"><div style={{ width: `${canAdjust && active ? active.intensity : 0}%` }} /></div>
           <span className="ms-meter-value">{canAdjust && active ? `${active.intensity}%` : "—"}</span>
+          <div className="ms-meter-bar"><div style={{ height: `${canAdjust && active ? active.intensity : 0}%` }} /></div>
         </div>
-        {gazeButton("intensity-up", "MORE +", { disabled: !canAdjust })}
-        {gazeButton("compare", compare ? "EXIT COMPARE" : "COMPARE", { pressed: compare })}
-        {gazeButton("undo", "UNDO", { disabled: look.past.length === 0 })}
-        {gazeButton("reprofile", "PROFILE")}
-        {gazeButton("xray", "X-RAY")}
-      </div>
+        {gazeButton("intensity-down", "−", { disabled: !canAdjust, kind: "fab" })}
+        {gazeButton("compare", compare ? "Exit" : "Compare", { pressed: compare, kind: "fab" })}
+        {gazeButton("undo", "Undo", { disabled: look.past.length === 0, kind: "fab" })}
+        {gazeButton("reprofile", "Profile", { kind: "fab" })}
+        {gazeButton("xray", "X-ray", { kind: "fab" })}
+      </aside>
 
-      <footer className="ms-footer">
-        <span>STABILITY {profile.stabilityPx}px · TARGETS ×{profile.targetScale} · REACH {profile.reachPct}%</span>
-        <span>PRESETS 1·2·3 · TOUCH LOCK T</span>
-      </footer>
+      <section className="ms-sheet" ref={sheetRef}>
+        <p className="ms-sheet-title">
+          {category.label} · {group.label}
+        </p>
+        <div className="ms-options-row" style={{ gridTemplateColumns: `repeat(${Math.max(group.options.length, 1)}, minmax(0, 1fr))` }} aria-label="Options">
+          {group.options.map((o) => {
+            const applied = look.present[slotKey(category.id, group.id)]?.optionId === o.id;
+            return gazeButton(`opt:${o.id}`, o.label, { pressed: applied, swatch: o.color, kind: "opt" });
+          })}
+        </div>
+        {category.groups.length > 1 && (
+          <div className="ms-groups" style={{ gridTemplateColumns: `repeat(${category.groups.length}, minmax(0, 1fr))` }} aria-label="Groups">
+            {category.groups.map((g) => gazeButton(`grp:${g.id}`, g.label, { pressed: g.id === group.id, kind: "pill" }))}
+          </div>
+        )}
+        <nav className="ms-tabs" aria-label="Categories">
+          {CATALOG.map((c) => gazeButton(`cat:${c.id}`, c.label, { pressed: c.id === category.id, kind: "tab" }))}
+        </nav>
+      </section>
     </div>
   );
 }

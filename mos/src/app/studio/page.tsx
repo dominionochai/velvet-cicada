@@ -80,7 +80,7 @@ function Flow() {
     <main style={{ position: "relative", height: "100vh", width: "100vw", overflow: "hidden", background: "var(--ms-bg)", color: "var(--ms-text)" }}>
       {showLoading && (
         <div className="ms-loading">
-          <h1>MOTOR SOVEREIGNTY</h1>
+          <h1>Mirror of Sovereignty</h1>
           <p>{STATUS_TEXT[initStatus] ?? initStatus}</p>
           {errorMessage && <p style={{ color: "var(--ms-danger)" }} role="alert">{errorMessage}</p>}
           <button type="button" className="ms-button" onClick={() => setDemo(true)}>

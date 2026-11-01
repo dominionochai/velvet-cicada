@@ -5,29 +5,27 @@ import {
   type MutableRefObject, type ReactNode,
 } from 'react';
 import type { FaceLandmarker } from '@mediapipe/tasks-vision';
+import { MODEL_URL, WASM_URL } from '@/lib/mediapipeConfig';
 import {
   GazeContext, type GazePosition, type GazeState, type HoverState, type TrackingOverlay,
 } from '@/lib/gazeContext';
 import { CalibrationManager, CALIBRATION_TARGETS, type GazeCalibration } from '@/lib/calibration';
-import { HomographyCalibration } from '@/lib/homographyCalibration';
-import { OneEuroSmooth } from '@/lib/oneEuroSmooth';
-import { loadOpenCv } from '@/lib/opencvVision';
 import { BlinkDetector } from '@/lib/blinkDetector';
 import { EMASmooth, type GazeSmoother } from '@/lib/emaSmooth';
 import {
   estimateRawGaze, IRIS_LEFT, IRIS_RIGHT, LEFT_EAR_IDX, RIGHT_EAR_IDX, type NormalizedLandmark,
 } from '@/lib/gazeEstimator';
 
-// The WASM runtime must match the installed npm package exactly. package.json
-// pins @mediapipe/tasks-vision to this version; bump both together.
-const MEDIAPIPE_VERSION = '0.10.35';
-const WASM_URL = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MEDIAPIPE_VERSION}/wasm`;
-const MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
-
 /** Lower = steadier cursor but more lag. */
 const GAZE_SMOOTHING_ALPHA = 0.12;
 /** Pixels the arrow keys move the cursor (accessibility / demo fallback). */
 const KEYBOARD_NUDGE_PX = 32;
+/** Calibration uses the median of this many recent raw frames, not a single noisy frame. */
+const RAW_HISTORY = 15;
+const median = (values: number[]) => {
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.floor(sorted.length / 2)];
+};
 
 /** MediaPipe's face mesh has 468 face points plus 10 iris points. */
 const LANDMARK_COUNT = 478;
@@ -100,7 +98,7 @@ export function GazeProvider({ children, autoStart = false }: { children: ReactN
   const streamRef = useRef<MediaStream | null>(null);
   const rafRef = useRef(0);
   const initializingRef = useRef(false);
-  // Start with dependency-free models; OpenCV's replace them once it has loaded (see below).
+  // Gaze path is MediaPipe-only: affine calibration + EMA smoothing. No OpenCV, so behaviour is identical on every load.
   const calibrationRef = useRef<GazeCalibration>(new CalibrationManager());
   const smootherRef = useRef<GazeSmoother>(new EMASmooth(GAZE_SMOOTHING_ALPHA));
   const blinkDetectorRef = useRef<BlinkDetector | null>(null);
@@ -111,6 +109,7 @@ export function GazeProvider({ children, autoStart = false }: { children: ReactN
   const overlayRef = useRef<TrackingOverlay>(NO_OVERLAY);
   const landmarkBufferRef = useRef(new Float32Array(LANDMARK_COUNT * 2));
   const hoverStateRef = useRef<HoverState>({ isHovering: false, dwellPct: 0 });
+  const recentRawRef = useRef<GazePosition[]>([]);
 
   const [state, setState] = useState<ReactiveState>(INITIAL_STATE);
 
@@ -119,23 +118,6 @@ export function GazeProvider({ children, autoStart = false }: { children: ReactN
       setState((prev) => ({ ...prev, blinkCount: prev.blinkCount + 1 }));
     });
     return () => { blinkDetectorRef.current = null; };
-  }, []);
-
-  // Upgrade to OpenCV's projective calibration and the adaptive 1-Euro smoother as soon as OpenCV.js is ready.
-  useEffect(() => {
-    let cancelled = false;
-    loadOpenCv()
-      .then((cv) => {
-        if (cancelled) return;
-        // Never swap models under a calibration that is already under way.
-        if (calibrationRef.current.sampleCount === 0 && !calibrationRef.current.isReady) {
-          calibrationRef.current = new HomographyCalibration(cv);
-          setState((prev) => ({ ...prev, calibrationModel: 'homography' }));
-        }
-        smootherRef.current = new OneEuroSmooth();
-      })
-      .catch((error: unknown) => console.warn('Advanced calibration unavailable; using the basic calibration and smoothing.', error));
-    return () => { cancelled = true; };
   }, []);
 
   const setFaceDetected = useCallback((detected: boolean) => {
@@ -156,6 +138,8 @@ export function GazeProvider({ children, autoStart = false }: { children: ReactN
     const raw = isBlinking ? null : estimateRawGaze(landmarks);
     if (raw) {
       rawIrisRef.current = raw;
+      recentRawRef.current.push(raw);
+      if (recentRawRef.current.length > RAW_HISTORY) recentRawRef.current.shift();
       const target = calibrationRef.current.apply(raw.x, raw.y)
         ?? { x: raw.x * window.innerWidth, y: raw.y * window.innerHeight };
       const smoothed = smootherRef.current.update(target.x, target.y);
@@ -263,9 +247,10 @@ export function GazeProvider({ children, autoStart = false }: { children: ReactN
       calibrationRef.current.addSample({
         screenX: target.x * window.innerWidth,
         screenY: target.y * window.innerHeight,
-        irisX: rawIrisRef.current.x,
-        irisY: rawIrisRef.current.y,
+        irisX: recentRawRef.current.length ? median(recentRawRef.current.map((p) => p.x)) : rawIrisRef.current.x,
+        irisY: recentRawRef.current.length ? median(recentRawRef.current.map((p) => p.y)) : rawIrisRef.current.y,
       });
+      recentRawRef.current = [];
 
       const nextStep = prev.calibrationStep + 1;
       return nextStep >= CALIBRATION_TARGETS.length

@@ -82,7 +82,7 @@ export default function StartPage() {
   return (
     <main className="ms-start">
       <section className="ms-start-card" aria-labelledby="ms-start-title">
-        <p className="ms-eyebrow">MOTOR SOVEREIGNTY</p>
+        <p className="ms-eyebrow">Mirror of Sovereignty</p>
         <h1 id="ms-start-title">Hands-free try-on, tuned to how you move.</h1>
         <p className="ms-lead">
           Add your API keys once. The studio measures your gaze in five seconds and adapts dwell time, target size and

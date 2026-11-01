@@ -56,8 +56,8 @@ export function GazeCursor() {
   }, [gazePositionRef, hoverStateRef]);
 
   // A high-contrast cursor stands out on all vibrant backgrounds
-  const primaryColor = '#ff0000'; // Red progress ring and crosshair
-  const hoverColor = '#ff0000'; 
+  const primaryColor = '#FFFFFF'; // White progress ring and crosshair (dark ring + halos keep it readable on any background)
+  const hoverColor = '#FFFFFF';
   const col   = isHovering ? hoverColor : primaryColor;
   const dimCol = 'var(--ink)'; // Solid black background ring
   const CIRC  = 2 * Math.PI * 16;
@@ -72,7 +72,7 @@ export function GazeCursor() {
         pointerEvents: 'none',
         zIndex: 9999,
         willChange: 'transform',
-        filter: 'drop-shadow(0 2px 6px rgba(0,0,0,0.5))'
+        filter: 'drop-shadow(0 0 1.5px rgba(255,255,255,0.9)) drop-shadow(0 2px 5px rgba(0,0,0,0.55))'
       }}
     >
       <svg width="60" height="60" viewBox="0 0 40 40" fill="none">
